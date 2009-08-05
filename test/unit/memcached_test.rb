@@ -261,6 +261,7 @@ class MemcachedTest < Test::Unit::TestCase
         result = cache.get key
       end
     end).real
+    socket.close
   end
 
   def test_get_with_no_block_server_timeout
@@ -288,6 +289,7 @@ class MemcachedTest < Test::Unit::TestCase
         result = cache.get key
       end
     end).real
+    socket.close
   end
 
   def test_get_with_prefix_key
@@ -400,8 +402,58 @@ class MemcachedTest < Test::Unit::TestCase
 
     stored_vals = (1..20).map { cache.get key }.uniq
 
-    assert_equal @servers.length, stored_vals.length # 20 random sets should hit all N servers if N < 5 
+    assert_equal @servers.length, stored_vals.length # 20 random sets should hit all N servers if N < 5
   end
+
+  def test_missing_server_with_random_distribution
+    puts "in the test"
+    socket = stub_server 43041
+    retry_timeout = 30
+    key = "test_key"
+    exceptions = []
+
+    cache = Memcached.new(
+      [@servers.last, 'localhost:43041'],
+      :auto_eject_hosts => true,
+      :distribution => :random,
+      :server_failure_limit => 1,
+      :retry_timeout => retry_timeout
+    )
+
+    # hit the servers a bunch, provoke 2 errors:  a timeout, and then a servermarkeddead.
+    100.times do
+      begin
+        cache.set key, @value
+      rescue => e
+        exceptions << e
+      end
+    end
+
+    assert_equal [Memcached::ATimeoutOccurred, Memcached::ServerIsMarkedDead], exceptions.map { |x| x.class }
+    
+    # Hit first server on retry
+    assert_nothing_raised do
+      cache.set(key, @value)
+      cache.get(key)
+    end
+
+    assert_equal @value, cache.get(key)
+    
+    sleep( retry_timeout + 1)
+    
+    # Hit second server again after restore, expect same failures
+    exceptions = []
+    100.times do
+      begin
+        cache.set key, @value
+      rescue => e
+        exceptions << e
+      end
+    end
+
+    assert_equal [Memcached::ATimeoutOccurred, Memcached::ServerIsMarkedDead], exceptions.map { |x| x.class }    
+  end
+
   
   # Set
 
@@ -800,32 +852,33 @@ class MemcachedTest < Test::Unit::TestCase
   # Server removal and consistent hashing
 
   def test_missing_server
-    socket = stub_server 43041  
+    puts "in the test"
+    socket = stub_server 43041
+    retry_timeout = 1
     cache = Memcached.new(
       [@servers.last, 'localhost:43041'],
       :prefix_key => @prefix_key,
       :auto_eject_hosts => true,
       :server_failure_limit => 1,
-      :retry_timeout => 30,
+      :retry_timeout => retry_timeout,
       :hash_with_prefix_key => false,
       :hash => :md5
     )
 
     # Hit first server
-#     key1 = 'test_missing_server6'
-#     cache.set(key1, @value)
-#     assert_equal cache.get(key1), @value
+    key1 = 'test_missing_server6'
+    cache.set(key1, @value)
+    assert_equal cache.get(key1), @value
 
-#     # Hit second server
-#     key2 = 'test_missing_server'
-#     assert_raise(Memcached::ATimeoutOccurred) do
-#       cache.set(key2, @value)
-#     end
+    # Hit second server
+    key2 = 'test_missing_server'
+    assert_raise(Memcached::ATimeoutOccurred) do
+      cache.set(key2, @value)
+    end
 
 
     # Hit second server again
     key2 = 'test_missing_server'
-    10.times { cache.get key2 rescue nil}
     begin
       cache.get(key2)
     rescue => e
@@ -840,14 +893,14 @@ class MemcachedTest < Test::Unit::TestCase
       cache.get(key2)
     end
     
-    sleep(2)
+    sleep( retry_timeout + 1)
     
     # Hit second server again after restore, expect same failure
     key2 = 'test_missing_server'
-    assert_raise(Memcached::SystemError) do
-#    assert_raise(Memcached::UnknownReadFailure) do
+    assert_raise(Memcached::ATimeoutOccurred) do
       cache.set(key2, @value)
-    end        
+    end
+    socket.close
   end
 
   def test_consistent_hashing
